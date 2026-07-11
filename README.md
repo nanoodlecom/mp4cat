@@ -77,6 +77,12 @@ mp4cat a.mp4 b.mp4 c.mp4 -o out.mp4
 If the inputs don't match, mp4cat exits with an error that says what to do
 (re-encode to matching codec/resolution first) rather than guessing.
 
+## Tests
+
+`npm test` generates its mp4 fixtures at test time with `ffmpeg`/`ffprobe`; if
+they're not on your PATH, the fixture-based tests skip cleanly with a message
+(the library itself never needs ffmpeg).
+
 ## API
 
 - **`isMp4(u8)`** → `boolean` — quick sniff: does this `Uint8Array` start with
