@@ -1,0 +1,51 @@
+{
+  "name": "mp4cat",
+  "version": "0.1.0",
+  "description": "Zero-dependency lossless mp4 concatenation for Node and the browser — copy compressed samples onto one timeline, no ffmpeg, no re-encode",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
+  "bin": {
+    "mp4cat": "./bin/mp4cat.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "files": [
+    "src",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mp4",
+    "concat",
+    "concatenate",
+    "video",
+    "lossless",
+    "remux",
+    "mux",
+    "h264",
+    "aac",
+    "browser",
+    "no-deps",
+    "zero-dependencies",
+    "nanoodle"
+  ],
+  "license": "MIT",
+  "homepage": "https://nanoodle.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nanoodlecom/mp4cat.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nanoodlecom/mp4cat/issues"
+  }
+}

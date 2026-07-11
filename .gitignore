@@ -1,0 +1,11 @@
+node_modules/
+nanoodle-out/
+.env
+.env.*
+*.tgz
+npm-debug.log*
+
+# test artifacts / generated fixtures
+tests/tmp/
+tests/fixtures/
+*.mp4
