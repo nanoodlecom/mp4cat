@@ -32,10 +32,22 @@ file or quietly re-encoding.
 
 ## Install
 
+Not on npm yet — install straight from the repo:
+
+```bash
+npm install github:nanoodlecom/mp4cat
+```
+
+Or, for hacking on it, clone and link (both steps needed):
+
 ```bash
 git clone https://github.com/nanoodlecom/mp4cat
-cd mp4cat && npm link      # or: npm install /path/to/mp4cat
+cd mp4cat && npm link
+cd /path/to/your-project && npm link mp4cat
 ```
+
+Either way, `import { concatMp4 } from "mp4cat"` resolves and the `mp4cat`
+CLI lands in `node_modules/.bin`.
 
 ## Quickstart (library, Node)
 
@@ -124,6 +136,10 @@ they're not on your PATH, the fixture-based tests skip cleanly with a message
   second audio) are not carried through; `mp4ParamsMatch` rejects such files.
 - **Edit lists are not preserved.** Clips relying on `elst` for A/V sync or
   leading-sample trims may drift slightly at seams.
+- **Timescale mismatches are rescaled with rounding.** Clips whose tracks use
+  a different timescale than the first clip get their sample durations
+  rescaled to the first clip's timescale via `Math.round`, so a tiny drift is
+  possible at seams; byte-identical codec config is still required.
 
 ## Provenance
 

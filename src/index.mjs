@@ -38,7 +38,7 @@ function scanForBox(u8, type){
   return null;
 }
 
-// Parse one mp4 into { moovTimescale, tracks:[{kind, timescale, stsdRaw, samples:[{offset,size,dur,cts,sync}], width,height}] }
+// Parse one mp4 into { tracks:[{kind, timescale, stsdRaw, codecCfg, samples:[{offset,size,dur,cts,sync}], width,height, channels,sampleRate}] }
 export function parseMp4(u8){
   const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
   const top = walk(dv, 0, u8.byteLength);
