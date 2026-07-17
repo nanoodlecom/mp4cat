@@ -59,17 +59,22 @@ export function parseMp4(u8){
     const mb = walk(dv, mdia.body, mdia.end);
     const mdhd = find(mb, "mdhd");
     const hdlr = find(mb, "hdlr");
-    if(!mdhd || !hdlr) continue;
+    if(!hdlr) continue; // can't classify a trak without a handler
+    const handler = fourcc(dv, hdlr.body + 8); // after ver/flags(4)+pre_defined(4)
+    const kind = handler === "vide" ? "video" : handler === "soun" ? "audio" : handler;
+    // A damaged media trak must fail loudly: silently skipping it would let a broken clip pass
+    // the gate as audio-only/video-only and drop a whole stream. Non-media traks skip quietly.
+    const isMedia = kind === "video" || kind === "audio";
+    const damaged = (what) => { throw new Error(kind + " trak is missing " + what + " (damaged file?)"); };
+    if(!mdhd){ if(isMedia) damaged("mdhd"); continue; }
     const mdhdV1 = dv.getUint8(mdhd.body) === 1;
     // v0: [ver/flags 4][ctime 4][mtime 4][timescale 4]; v1: [ver/flags 4][ctime 8][mtime 8][timescale 4]
     const timescale = dv.getUint32(mdhd.body + (mdhdV1 ? 20 : 12));
-    const handler = fourcc(dv, hdlr.body + 8); // after ver/flags(4)+pre_defined(4)
-    const kind = handler === "vide" ? "video" : handler === "soun" ? "audio" : handler;
-    const minf = find(mb, "minf"); if(!minf) continue;
+    const minf = find(mb, "minf"); if(!minf){ if(isMedia) damaged("minf"); continue; }
     const minfB = walk(dv, minf.body, minf.end);
-    const stbl = find(minfB, "stbl"); if(!stbl) continue;
+    const stbl = find(minfB, "stbl"); if(!stbl){ if(isMedia) damaged("stbl"); continue; }
     const sb = walk(dv, stbl.body, stbl.end);
-    const stsd = find(sb, "stsd"); if(!stsd) continue;
+    const stsd = find(sb, "stsd"); if(!stsd){ if(isMedia) damaged("stsd"); continue; }
     const stsdRaw = u8.slice(stsd.start, stsd.end); // whole stsd box, copied verbatim into output
     // first sample entry's 4cc: stsd hdr(8) + ver/flags(4) + entry_count(4) + entry size(4) → type at 20
     const sampleEntry = stsdRaw.length >= 24 ? String.fromCharCode(stsdRaw[20], stsdRaw[21], stsdRaw[22], stsdRaw[23]) : "????";
@@ -161,6 +166,13 @@ export function parseMp4(u8){
     const byId = new Map(tracks.map(t => [t.trackId, t]));
     for(const moof of moofs) parseMoof(dv, moof, byId, trexById);
   }
+  // every sample must live inside the file — a truncated download parses fine up to here but
+  // its mdat is cut, and copying clamped subarrays would silently emit a corrupt output
+  for(const t of tracks){
+    for(const s of t.samples){
+      if(s.offset + s.size > u8.byteLength) throw new Error(t.kind + " samples extend past end of file (truncated file?)");
+    }
+  }
   return { tracks, fragmented: moofs.length > 0 };
 }
 
@@ -210,6 +222,10 @@ function parseMoof(dv, moof, byId, trexById){
 const enc = (s) => Uint8Array.from(s, c => c.charCodeAt(0));
 function u32(n){ const a = new Uint8Array(4); new DataView(a.buffer).setUint32(0, n>>>0); return a; }
 function u16(n){ const a = new Uint8Array(2); new DataView(a.buffer).setUint16(0, n & 0xffff); return a; }
+function u64(n){ const a = new Uint8Array(8); new DataView(a.buffer).setBigUint64(0, BigInt(n)); return a; }
+// one packed big-endian u32 array — sample tables can run to hundreds of thousands of entries,
+// far past V8's max argument count, so they must never be spread into box()/fullbox()
+function u32Table(values){ const a = new Uint8Array(values.length*4); const dv = new DataView(a.buffer); for(let i=0;i<values.length;i++) dv.setUint32(i*4, values[i]>>>0); return a; }
 function concat(arrs){ let len=0; for(const a of arrs) len += a.length; const out = new Uint8Array(len); let p=0; for(const a of arrs){ out.set(a, p); p += a.length; } return out; }
 function box(type, ...payload){ const body = concat(payload); return concat([u32(body.length + 8), enc(type), body]); }
 function fullbox(type, version, flags, ...payload){ return box(type, Uint8Array.from([version, (flags>>16)&255, (flags>>8)&255, flags&255]), ...payload); }
@@ -269,7 +285,9 @@ export function concatMp4(buffers, opts){
   let mdatSize = 0;
   for(const t of outTracks) for(const s of t.samples) mdatSize += s.size;
 
-  const ftyp = box("ftyp", enc("isom"), u32(0x200), enc("isomiso2avc1mp41"));
+  // only claim avc1 brand compatibility when there is actually an AVC track
+  const hasAvc = outTracks.some(t => t.kind === "video" && scanForBox(t.stsdRaw, "avcC"));
+  const ftyp = box("ftyp", enc("isom"), u32(0x200), enc(hasAvc ? "isomiso2avc1mp41" : "isomiso2mp41"));
   const mvTimescale = 1000;
 
   // moov size does not depend on the offset VALUES in stco (fixed 4 bytes each), so build once
@@ -289,23 +307,24 @@ export function concatMp4(buffers, opts){
       // stbl children
       const myChunks = []; // [offset, samplesPerChunk] in this track's chunk order
       chunks.forEach((c,i)=>{ if(c.ti===k) myChunks.push([chunkOff[i], c.samples.length]); });
-      const stscParts = []; let first = 1;
-      for(const r of rle(myChunks.map(c=>c[1]))){ stscParts.push(concat([u32(first), u32(r[1]), u32(1)])); first += r[0]; }
-      const stsc = fullbox("stsc", 0, 0, u32(stscParts.length), ...stscParts);
-      const stco = fullbox("stco", 0, 0, u32(myChunks.length), ...myChunks.map(c=>u32(c[0])));
+      const stscVals = []; let first = 1;
+      for(const r of rle(myChunks.map(c=>c[1]))){ stscVals.push(first, r[1], 1); first += r[0]; }
+      const stsc = fullbox("stsc", 0, 0, u32(stscVals.length/3), u32Table(stscVals));
+      const stco = fullbox("stco", 0, 0, u32(myChunks.length), u32Table(myChunks.map(c=>c[0])));
       const sttsRuns = rle(t.samples.map(s=>s.dur));
-      const stts = fullbox("stts", 0, 0, u32(sttsRuns.length), ...sttsRuns.map(r=>concat([u32(r[0]), u32(r[1])])));
-      const stsz = fullbox("stsz", 0, 0, u32(0), u32(t.samples.length), ...t.samples.map(s=>u32(s.size)));
+      const stts = fullbox("stts", 0, 0, u32(sttsRuns.length), u32Table(sttsRuns.flat()));
+      const stsz = fullbox("stsz", 0, 0, u32(0), u32(t.samples.length), u32Table(t.samples.map(s=>s.size)));
       const children = [t.stsdRaw, stts];
       if(t.kind==="video"){
         const anyCts = t.samples.some(s=>s.cts!==0);
         if(anyCts){
           const cttsVer = t.samples.some(s=>s.cts<0) ? 1 : 0; // v0 is unsigned; negatives need v1
           const cttsRuns = rle(t.samples.map(s=>s.cts));
-          children.push(fullbox("ctts", cttsVer, 0, u32(cttsRuns.length), ...cttsRuns.map(r=>concat([u32(r[0]), u32(r[1]>>>0)]))));
+          children.push(fullbox("ctts", cttsVer, 0, u32(cttsRuns.length), u32Table(cttsRuns.flat())));
         }
         const syncIdx = []; t.samples.forEach((s,i)=>{ if(s.sync) syncIdx.push(i+1); });
-        if(syncIdx.length && syncIdx.length !== t.samples.length) children.push(fullbox("stss", 0, 0, u32(syncIdx.length), ...syncIdx.map(u32)));
+        // when NO sample is sync, an explicit empty stss is required — omitting the box means "all sync"
+        if(syncIdx.length !== t.samples.length) children.push(fullbox("stss", 0, 0, u32(syncIdx.length), u32Table(syncIdx)));
       }
       children.push(stsc, stsz, stco);
       const stbl = box("stbl", ...children);
@@ -319,7 +338,11 @@ export function concatMp4(buffers, opts){
 
       const hdlrName = enc(t.kind==="video" ? "VideoHandler\0" : "SoundHandler\0");
       const hdlr = fullbox("hdlr", 0, 0, u32(0), enc(t.kind==="video"?"vide":"soun"), new Uint8Array(12), hdlrName);
-      const mdhd = fullbox("mdhd", 0, 0, u32(0), u32(0), u32(t.timescale), u32(totalTicks), Uint8Array.from([0x55,0xc4,0,0]));
+      // v1 mdhd (64-bit duration) when the tick count outgrows u32 — high-timescale tracks
+      // (e.g. 1 MHz) pass 2^32 ticks in ~71 minutes, far below any byte-size limit
+      const mdhd = totalTicks > 0xffffffff
+        ? fullbox("mdhd", 1, 0, new Uint8Array(16), u32(t.timescale), u64(totalTicks), Uint8Array.from([0x55,0xc4,0,0]))
+        : fullbox("mdhd", 0, 0, u32(0), u32(0), u32(t.timescale), u32(totalTicks), Uint8Array.from([0x55,0xc4,0,0]));
       const mdia = box("mdia", mdhd, hdlr, minf);
 
       // tkhd (enabled+in_movie flags=7)
@@ -355,6 +378,33 @@ export function concatMp4(buffers, opts){
 export function isMp4(u8){ if(u8.length<12) return false; const dv=new DataView(u8.buffer,u8.byteOffset,u8.byteLength); return fourcc(dv,4)==="ftyp"; }
 
 function bytesEqual(a, b){ if(!a || !b || a.length !== b.length) return false; for(let i=0;i<a.length;i++) if(a[i]!==b[i]) return false; return true; }
+
+// Comparable audio decoder-config signature. Whole-esds comparison would false-reject same-encoder
+// clips (DecoderConfigDescriptor carries per-clip bufferSizeDB/maxBitrate/avgBitrate), so for esds
+// we compare only objectTypeIndication + DecoderSpecificInfo (the AudioSpecificConfig — profile,
+// frame length, SBR signaling: what actually decides decode compatibility). dOps has no per-clip
+// fields and compares whole. alac carries avgBitRate/maxFrameBytes → null (rate/channel gate only).
+function audioCfgSig(cfg, type){
+  if(!cfg) return null;
+  if(type === "dOps") return cfg;
+  if(type !== "esds") return null;
+  try{
+    let p = 12; // box hdr(8) + ver/flags(4)
+    const len = () => { let l = 0, b; do{ b = cfg[p++]; l = (l<<7) | (b & 0x7f); }while(b & 0x80); return l; };
+    if(cfg[p++] !== 0x03) return null; len();
+    p += 2; const f = cfg[p++]; // ES_ID(2) + flags
+    if(f & 0x80) p += 2;              // dependsOn_ES_ID
+    if(f & 0x40) p += 1 + cfg[p];     // URL
+    if(f & 0x20) p += 2;              // OCR_ES_ID
+    if(cfg[p++] !== 0x04) return null;
+    len();
+    const oti = cfg[p]; p += 13; // OTI(1)+streamType(1)+bufferSizeDB(3)+maxBitrate(4)+avgBitrate(4)
+    if(p >= cfg.length || cfg[p++] !== 0x05) return Uint8Array.of(oti); // no ASC → OTI only
+    const dsLen = len();
+    const out = new Uint8Array(1 + dsLen); out[0] = oti; out.set(cfg.subarray(p, p + dsLen), 1);
+    return out;
+  }catch(e){ return null; }
+}
 
 // Strict gate with a human-readable verdict: { ok, reason }. reason is null when ok, otherwise one
 // sentence naming the first offending clip and what differs. A false positive silently corrupts
@@ -393,6 +443,8 @@ export function mp4Compat(bufs, opts){
       if(a.sampleEntry !== ba.sampleEntry) return no(name(i) + " audio is " + a.sampleEntry + " but " + name(0) + " is " + ba.sampleEntry + " — re-encode to one codec first");
       if(a.sampleRate !== ba.sampleRate) return no(name(i) + " audio is " + a.sampleRate + " Hz but " + name(0) + " is " + ba.sampleRate + " Hz — resample first");
       if(a.channels !== ba.channels) return no(name(i) + " audio has " + a.channels + " channel(s) but " + name(0) + " has " + ba.channels);
+      const sig = audioCfgSig(a.codecCfg, a.codecCfgType), bsig = audioCfgSig(ba.codecCfg, ba.codecCfgType);
+      if((sig || bsig) && !bytesEqual(sig, bsig)) return no(name(i) + "'s audio decoder configuration differs from " + name(0) + "'s (e.g. AAC-LC vs HE-AAC) — re-encode with identical encoder settings first");
     }
   }
   return { ok: true, reason: null };

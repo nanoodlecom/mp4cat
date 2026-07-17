@@ -203,10 +203,10 @@ test("concatMp4 output is streamable: moov before mdat, tracks interleaved", (t)
     `moov must precede mdat for progressive playback, got ${boxes.join(",")}`);
   // interleaved: the video samples must not all sit before all audio samples (or vice versa)
   const p = parseMp4(bytes);
-  const v = p.tracks.find(x => x.kind === "video").samples;
-  const au = p.tracks.find(x => x.kind === "audio").samples;
-  const vMax = Math.max(...v.map(s => s.offset)), aMin = Math.min(...au.map(s => s.offset));
-  const aMax = Math.max(...au.map(s => s.offset)), vMin = Math.min(...v.map(s => s.offset));
+  // no Math.max(...arr) — spread has an argument-count ceiling real sample counts exceed
+  const range = (list) => list.reduce((r, s) => [Math.min(r[0], s.offset), Math.max(r[1], s.offset)], [Infinity, -Infinity]);
+  const [vMin, vMax] = range(p.tracks.find(x => x.kind === "video").samples);
+  const [aMin, aMax] = range(p.tracks.find(x => x.kind === "audio").samples);
   assert.ok(vMax > aMin && aMax > vMin, "video and audio byte ranges should overlap (interleaved)");
 });
 
@@ -236,6 +236,50 @@ test("audio-only concat (m4a): gate passes, output decodes, duration adds up", a
   assert.equal(stderr.trim(), "", "ffmpeg full decode should report no errors");
   // audio + video must not gate together
   assert.equal(mp4Compat([M4A1, A]).ok, false);
+});
+
+// file offset of a fourcc's first byte, or -1
+function indexOfFourcc(u8, cc){
+  const [a,b,c,d] = [...cc].map(ch => ch.charCodeAt(0));
+  for(let i=0;i+4<=u8.length;i++) if(u8[i]===a && u8[i+1]===b && u8[i+2]===c && u8[i+3]===d) return i;
+  return -1;
+}
+
+test("mp4Compat rejects a video codec-config (avcC) mismatch at equal resolution", (t) => {
+  if(!dir) return t.skip(skipMsg);
+  const mut = B.slice();
+  const i = indexOfFourcc(mut, "avcC");
+  assert.ok(i > 0, "fixture has an avcC box");
+  mut[i + 5] ^= 0xff; // flip the AVC profile byte inside avcC (resolution untouched)
+  const r = mp4Compat([A, mut], { names: ["a.mp4", "mut.mp4"] });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /video codec configuration .* differs/);
+});
+
+test("mp4Compat rejects an audio decoder-config (ASC) mismatch at equal rate/channels", (t) => {
+  if(!dir) return t.skip(skipMsg);
+  // walk the esds descriptors exactly as the library does to find the AudioSpecificConfig
+  const mut = B.slice();
+  let p = indexOfFourcc(mut, "esds") + 8; // past fourcc + ver/flags
+  const len = () => { let l = 0, b; do{ b = mut[p++]; l = (l<<7) | (b & 0x7f); }while(b & 0x80); return l; };
+  assert.equal(mut[p++], 0x03); len(); p += 3;      // ES_Descriptor (flags byte 0 in ffmpeg output)
+  assert.equal(mut[p++], 0x04); len(); p += 13;     // DecoderConfigDescriptor incl. bitrate fields
+  assert.equal(mut[p++], 0x05); len();              // DecoderSpecificInfo = AudioSpecificConfig
+  mut[p] ^= 0x10;                                    // change the audio object type bits
+  const r = mp4Compat([A, mut], { names: ["a.mp4", "mut.mp4"] });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /audio decoder configuration differs/);
+  // and same-encoder clips with different bitrate stats must still pass (A vs B differ there)
+  assert.equal(mp4Compat([A, B]).ok, true);
+});
+
+test("truncated file (moov intact, mdat cut) is rejected, not silently clamped", (t) => {
+  if(!dir) return t.skip(skipMsg);
+  const cut = FRAG.slice(0, FRAG.length - 1024); // frag fixture keeps moov up front
+  assert.throws(() => parseMp4(cut), /past end of file/);
+  const r = mp4Compat([A, cut], { names: ["a.mp4", "cut.mp4"] });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /cut\.mp4 is not a parseable mp4/);
 });
 
 test("CLI end-to-end: concat two files, refuse mismatched ones", async (t) => {
@@ -293,6 +337,19 @@ test("CLI: -o - writes the mp4 to stdout, --dedup drops one frame per seam, --ve
 
   const { stdout: ver } = await run(process.execPath, [CLI, "--version"]);
   assert.match(ver.trim(), /^\d+\.\d+\.\d+$/);
+});
+
+test("CLI rejects flags that would be silently ignored, and bare '-' anywhere", async (t) => {
+  if(!dir) return t.skip(skipMsg);
+  const cases = [
+    [[a, b, "--json", "-o", "out.mp4"], /--json requires --info/],
+    [["--info", "--dedup", a], /cannot be combined/],
+    [["--info", "-o", "x.mp4", a], /cannot be combined/],
+    [["-o", "out.mp4", a, "-"], /stdin input is not supported/],
+  ];
+  for(const [args, re] of cases){
+    await assert.rejects(run(process.execPath, [CLI, ...args]), (e) => { assert.match(e.stderr, re); return true; });
+  }
 });
 
 test("cleanup", async (t) => {

@@ -124,9 +124,11 @@ Full TypeScript declarations ship with the package.
   file. `opts.dedup: true` drops each later clip's **first video sample** —
   useful when clips are chained continuations where clip N+1's first frame
   duplicates clip N's last frame. Caution: on most files that first sample is
-  a keyframe, so `dedup` is only safe for clips authored with that chaining in
-  mind; default is `false`. Call `mp4Compat` first — `concatMp4` does not
-  re-check.
+  a keyframe — if it's the clip's *only* keyframe, dropping it makes the rest
+  of that clip undecodable, and audio is not correspondingly trimmed (≈ one
+  frame of A/V drift per seam). `dedup` is only safe for clips authored with
+  that chaining in mind; default is `false`. Call `mp4Compat` first —
+  `concatMp4` does not re-check.
 - **`mp4Info(u8)`** → `{ fragmented, duration, tracks }` — friendly probe:
   per-track codec (4cc + friendly name), duration, sample count, video
   width/height/fps, audio channels/sample rate. No ffprobe needed.

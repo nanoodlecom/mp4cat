@@ -32,6 +32,9 @@ function fail(msg){
   process.exit(1);
 }
 
+// a downstream pipe closing early (mp4cat ... -o - | head) is normal Unix behavior, not a crash
+process.stdout.on("error", (e) => { if(e.code === "EPIPE") process.exit(0); throw e; });
+
 const argv = process.argv.slice(2);
 if(argv.length === 0 || argv.includes("-h") || argv.includes("--help")){
   console.log(USAGE);
@@ -56,14 +59,18 @@ for(let i=0; i<argv.length; i++){
     json = true;
   }else if(a === "--dedup"){
     dedup = true;
-  }else if(a === "-" && out === null && argv[i-1] !== "-o" && argv[i-1] !== "--output"){
-    fail("stdin input is not supported — pass file paths");
-  }else if(a.startsWith("-") && a !== "-"){
+  }else if(a === "-"){
+    fail("stdin input is not supported — pass file paths"); // -o's value is consumed above, so this is always a bare input
+  }else if(a.startsWith("-")){
     fail("unknown option " + a + " (see mp4cat --help)");
   }else{
     inputs.push(a);
   }
 }
+
+// every accepted flag must affect the run — silently ignoring a flag hides user mistakes
+if(info && (out !== null || dedup)) fail("--info inspects files and cannot be combined with " + (dedup ? "--dedup" : "-o"));
+if(!info && json) fail("--json requires --info");
 
 async function readMp4(file){
   let bytes;
@@ -74,6 +81,7 @@ async function readMp4(file){
 }
 
 if(info){
+  // no process.exit here: exiting before async stdout drains truncates piped output
   if(!inputs.length) fail("--info needs at least one file");
   const all = [];
   for(const file of inputs){
@@ -95,33 +103,32 @@ if(info){
       }
     }
   }
-  process.exit(0);
-}
+}else{
+  if(!out) fail("no output file — pass -o out.mp4 (or -o - for stdout), or --info to inspect files");
+  if(inputs.length < 2) fail("need at least two input files to concatenate");
 
-if(!out) fail("no output file — pass -o out.mp4 (or -o - for stdout), or --info to inspect files");
-if(inputs.length < 2) fail("need at least two input files to concatenate");
+  const bufs = [];
+  for(const file of inputs) bufs.push(await readMp4(file));
 
-const bufs = [];
-for(const file of inputs) bufs.push(await readMp4(file));
-
-const compat = mp4Compat(bufs, { names: inputs });
-if(!compat.ok){
-  fail(`input files have mismatched codec parameters, so a lossless concat would produce a broken file.
+  const compat = mp4Compat(bufs, { names: inputs });
+  if(!compat.ok){
+    fail(`input files have mismatched codec parameters, so a lossless concat would produce a broken file.
 Problem: ${compat.reason}.
 Fix: re-encode the inputs to matching parameters first, e.g.:
   ffmpeg -i in.mp4 -vf scale=1280:720 -c:v libx264 -pix_fmt yuv420p -c:a aac -ar 44100 -ac 2 matched.mp4
 then run mp4cat on the re-encoded files.`);
-}
+  }
 
-let result;
-try{ result = concatMp4(bufs, { dedup }); }
-catch(e){ fail("concat failed: " + (e && e.message || e)); }
+  let result;
+  try{ result = concatMp4(bufs, { dedup }); }
+  catch(e){ fail("concat failed: " + (e && e.message || e)); }
 
-if(out === "-"){
-  process.stdout.write(result);
-  process.stderr.write("mp4cat: wrote mp4 to stdout (" + result.length + " bytes, " + inputs.length + " clips)\n");
-}else{
-  try{ await writeFile(out, result); }
-  catch(e){ fail("cannot write " + out + ": " + (e && e.message || e)); }
-  console.log("wrote " + out + " (" + result.length + " bytes, " + inputs.length + " clips)");
+  if(out === "-"){
+    process.stdout.write(result);
+    process.stderr.write("mp4cat: wrote mp4 to stdout (" + result.length + " bytes, " + inputs.length + " clips)\n");
+  }else{
+    try{ await writeFile(out, result); }
+    catch(e){ fail("cannot write " + out + ": " + (e && e.message || e)); }
+    console.log("wrote " + out + " (" + result.length + " bytes, " + inputs.length + " clips)");
+  }
 }
