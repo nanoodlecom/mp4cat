@@ -1,11 +1,15 @@
 {
   "name": "mp4cat",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Zero-dependency lossless mp4 concatenation for Node and the browser — copy compressed samples onto one timeline, no ffmpeg, no re-encode",
   "type": "module",
   "main": "./src/index.mjs",
+  "types": "./src/index.d.ts",
   "exports": {
-    ".": "./src/index.mjs",
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.mjs"
+    },
     "./package.json": "./package.json"
   },
   "sideEffects": false,
