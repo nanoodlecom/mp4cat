@@ -9,9 +9,6 @@ Zero runtime dependencies. Pure `DataView`/`Uint8Array`, so the same module
 runs in Node and in a `<script type="module">` unchanged. Library + CLI in one
 install.
 
-> **Not yet on npm.** The `mp4cat` package name is unclaimed/unverified —
-> until it's published, install from the repo.
-
 ## Why
 
 Joining videos usually means shelling out to ffmpeg or re-encoding through
@@ -32,10 +29,8 @@ file or quietly re-encoding.
 
 ## Install
 
-Not on npm yet — install straight from the repo:
-
 ```bash
-npm install github:nanoodlecom/mp4cat
+npm install mp4cat
 ```
 
 Or, for hacking on it, clone and link (both steps needed):
