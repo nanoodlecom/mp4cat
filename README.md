@@ -22,7 +22,7 @@ silently producing a broken file or quietly re-encoding.
 
 | | |
 |---|---|
-| **Runtime** | Node ≥ 20 or any modern browser · no deps · TypeScript types included |
+| **Runtime** | Node 22.23.4+, 24.22.1+, or 26.12.1+ or any modern browser · no deps · TypeScript types included |
 | **Input** | progressive **or fragmented** (fMP4/CMAF) mp4, video+audio or audio-only (m4a) |
 | **Output** | one streamable progressive mp4 — `moov` first, tracks interleaved, bit-exact sample copies |
 | **Origin** | extracted from [nanoodle](https://nanoodle.com)'s Combine node |
