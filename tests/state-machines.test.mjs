@@ -17,9 +17,9 @@ const full = (type, flags, ...body) => box(type, u32(flags), ...body);
 // A tiny structural fixture: real sample tables, arbitrary payload (no decoder required).
 function fixture({ fragmented = false, timescale = 30, duration = 1, cts = 0,
   sttsCount = 1, offset = null, description = 1, runs = 1, secondDts = duration * runs, baseMode = 'moof', trackId = 1,
-  fragmentTrackId = 1, handler = 'vide', extendedStsd = false } = {}) {
+  fragmentTrackId = 1, handler = 'vide', extendedStsd = false, sampleEntry = 'avc1' } = {}) {
   const ftyp = box('ftyp', new TextEncoder().encode('isom'), u32(0));
-  const standardStsd = full('stsd', 0, u32(1), box('avc1', new Uint8Array(78), box('avcC', Uint8Array.of(1, 100, 0, 31))));
+  const standardStsd = full('stsd', 0, u32(1), box(sampleEntry, new Uint8Array(78), box('avcC', Uint8Array.of(1, 100, 0, 31))));
   const stsd = extendedStsd ? cat(u32(1), new TextEncoder().encode('stsd'), u32(0), u32(standardStsd.length + 8), standardStsd.slice(8)) : standardStsd;
   const moov = dataOffset => box('moov', box('trak',
     full('tkhd', 7, u32(0), u32(0), u32(trackId), new Uint8Array(60), u32(16 << 16), u32(16 << 16)),
@@ -197,4 +197,10 @@ test('extended stsd headers preserve sample-entry identity through remuxing', ()
   assert.equal(parseMp4(bytes).tracks[0].sampleEntry, 'avc1');
   assert.equal(mp4Compat([fixture(), bytes]).ok, true);
   assert.equal(parseMp4(concatMp4([bytes, bytes])).tracks[0].sampleEntry, 'avc1');
+});
+
+
+test('encrypted sample entries cannot pass the compatibility gate', () => {
+  const bytes = fixture({ sampleEntry: 'encv' });
+  assert.match(mp4Compat([bytes, bytes]).reason, /encrypted samples/);
 });

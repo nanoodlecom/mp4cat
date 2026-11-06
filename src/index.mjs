@@ -548,6 +548,7 @@ export function mp4Compat(bufs, opts){
     if(s.v.length !== b.v.length) return no(name(i) + " has " + s.v.length + " video track(s) but " + name(0) + " has " + b.v.length + " (video must be all-or-none, at most one)");
     if(s.a.length !== b.a.length) return no(name(i) + " has " + s.a.length + " audio track(s) but " + name(0) + " has " + b.a.length + " (audio must be all-or-none, at most one)");
     for(const t of [...s.v, ...s.a]){
+      if(t.sampleEntry === "encv" || t.sampleEntry === "enca") return no(name(i) + " has encrypted samples (mp4cat cannot preserve encryption metadata)");
       if(!t.samples.length) return no(name(i) + "'s " + t.kind + " track has no samples");
     }
     for(const t of s.a){

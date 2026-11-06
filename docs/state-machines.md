@@ -20,7 +20,7 @@ queue in this repository.
 | Fragment defaults `(trex → tfhd → trun)` | Movie defaults overridden by track then sample fields; one supported description; first-sample flags versus per-sample flags | Bounds/version checks, unsupported transitions and unknown track references rejected |
 | Fragment byte cursor `(base, position, previous traf end)` | Explicit absolute base / moof base / implicit carry; signed trun relative offset; omitted offset continues previous run | Sample must reside wholly in an mdat payload; negative and unsafe offsets rejected; positive base modes and multiple-run continuation tested |
 | Fragment decode cursor `(track ID, next DTS)` | First tfdt establishes origin; following tfdt must equal accumulated durations; omitted tfdt continues | Fixed silent collapse of gaps/overlaps, including reordered or replayed nonempty fragments with timestamps; unsafe 64-bit precision rejected |
-| Compatibility gate `(parsed clips, shape, decoder signatures)` | Parse → shape → video config / audio config → accept or named failure | Fixed dropped extra tracks and acceptance of equally missing/damaged audio descriptors; ALAC signature preserves decoder fields while ignoring known bitrate statistics |
+| Compatibility gate `(parsed clips, shape, decoder signatures)` | Parse → shape → video config / audio config → accept or named failure | Fixed dropped extra tracks and acceptance of equally missing/damaged audio descriptors; encrypted sample entries rejected; ALAC signature preserves decoder fields while ignoring known bitrate statistics |
 | Concat timeline `(clip, track, output timescale, dedup)` | Match corresponding tracks, optionally drop later first video sample, rescale → merged samples | Explicit empty-input error; zero/overflow rescaled durations and unrepresentable composition offsets rejected |
 | Interleaver `(track cursors, next DTS)` | Select earliest finite DTS; consume ≥1 sample per chunk; stop when all consumed | Positive parsed timescales/durations prevent NaN state from silently dropping samples |
 | Writer `(chunks, offsets, first moov size, final moov size)` | Size pass → relocated offsets → final moov → payload copy | Existing 4-GiB and moov-size checks retained; reject movie-duration wrap and mixed CTS values that cannot share one signed table |
@@ -78,7 +78,7 @@ fully decodes progressive, fragmented, and audio-only concatenations with FFmpeg
 
 ## Local verification
 
-- Node `22.23.4`: 35/35 tests passed, 0 skipped, with FFmpeg/ffprobe 7.0.2.
+- Node `22.23.4`: 36/36 tests passed, 0 skipped, with FFmpeg/ffprobe 7.0.2.
 - Node `24.22.1`: full media/CLI suite passed during implementation; the exact
   final head is also checked by the PR matrix (22.23.4 / 24.22.1 / 26.12.1).
 - `git diff --check` passed; `npm pack --dry-run` contained only the expected six
