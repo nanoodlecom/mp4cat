@@ -78,8 +78,9 @@ fully decodes progressive, fragmented, and audio-only concatenations with FFmpeg
 
 ## Local verification
 
-- Node `22.23.4`: 36/36 tests passed, 0 skipped, with FFmpeg/ffprobe 7.0.2.
-- Node `24.22.1`: full media/CLI suite passed during implementation; the exact
-  final head is also checked by the PR matrix (22.23.4 / 24.22.1 / 26.12.1).
+- Node `22.23.4`: 35/35 tests passed before the final encrypted-entry guard.
+- Node `24.22.1`: 36/36 tests passed, 0 skipped, with FFmpeg/ffprobe 7.0.2.
+  The exact final head is also checked by the PR matrix
+  (22.23.4 / 24.22.1 / 26.12.1).
 - `git diff --check` passed; `npm pack --dry-run` contained only the expected six
   package files. No tarball was published and the package version stays `0.2.0`.
