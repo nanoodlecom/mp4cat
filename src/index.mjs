@@ -109,6 +109,7 @@ export function parseMp4(u8){
     // video dims from tkhd (16.16 fixed at the end of the box, same position for v0/v1)
     let width = 0, height = 0, trackId = tracks.length + 1;
     const tkhd = find(tb, "tkhd");
+    if(!tkhd) damaged("tkhd");
     if(tkhd){
       need(tkhd, 4);
       if(dv.getUint8(tkhd.body) > 1) throw new Error("unsupported tkhd version");

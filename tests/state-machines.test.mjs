@@ -168,6 +168,7 @@ test('extended headers, field bounds, and fragment run counts fail closed', () =
   for(const [fourcc, relative, value, reason] of [
     ['stts', -4, 16, /box/], // malformed sibling layout cannot be silently truncated
     ['stsd', 8, 2, /description/],
+    ['tkhd', 0, 0, /tkhd/], // do not invent a missing track ID
     ['stsc', 8, 2, /stsc/],
     ['trun', 8, 0xffffffff, /sample count/],
     ['tfhd', 4, 0x02000000, /version/],
