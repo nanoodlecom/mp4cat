@@ -369,6 +369,31 @@ test("audio compatibility fails closed for missing or damaged decoder descriptor
   }
 });
 
+test("ALAC and Opus nested configs survive compatibility checks and full remux/decode", async (t) => {
+  if(!dir) return t.skip(skipMsg);
+  for(const [codec, extension] of [["alac", "m4a"], ["libopus", "mp4"]]){
+    const input = join(dir, codec + "." + extension), output = join(dir, codec + "-out." + extension);
+    await run("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=duration=1", "-c:a", codec, "-y", input]);
+    const bytes = new Uint8Array(await readFile(input));
+    assert.deepEqual(mp4Compat([bytes, bytes]), { ok: true, reason: null });
+    const track = parseMp4(bytes).tracks[0];
+    assert.equal(track.codecCfgType, codec === "alac" ? "alac" : "dOps");
+    if(codec === "alac"){
+      assert.equal(track.codecCfg.length, 36, "config is the nested box, not the ALAC sample entry");
+      const changed = bytes.slice();
+      const first = indexOfFourcc(changed, "alac");
+      const at = first + 4 + indexOfFourcc(changed.subarray(first + 4), "alac");
+      changed[at + 13] ^= 1; // decoder bitDepth (not a per-clip bitrate statistic)
+      assert.match(mp4Compat([bytes, changed]).reason, /audio decoder configuration differs/);
+      const stats = bytes.slice(); stats[at + 24] ^= 1; // avgBitRate
+      assert.equal(mp4Compat([bytes, stats]).ok, true);
+    }
+    await writeFile(output, concatMp4([bytes, bytes]));
+    const { stderr } = await run("ffmpeg", ["-v", "error", "-i", output, "-f", "null", "-"]);
+    assert.equal(stderr.trim(), "");
+  }
+});
+
 test("cleanup", async (t) => {
   if(dir) await rm(dir, { recursive: true, force: true });
 });

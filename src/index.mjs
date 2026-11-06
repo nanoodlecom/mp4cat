@@ -100,8 +100,10 @@ export function parseMp4(u8){
     // Use parsed boundaries: stsd itself may have an extended-size header.
     const sampleEntry = entries[0].type;
     let codecCfg = null, codecCfgType = null;
+    // Search within the entry body: ALAC uses the same 4cc for entry and config.
+    const configBytes = u8.subarray(entries[0].body, entries[0].end);
     for(const cc of (CFG_BOXES[kind] || [...CFG_BOXES.video, ...CFG_BOXES.audio])){
-      codecCfg = scanForBox(stsdRaw, cc);
+      codecCfg = scanForBox(configBytes, cc);
       if(codecCfg){ codecCfgType = cc; break; }
     }
     // video dims from tkhd (16.16 fixed at the end of the box, same position for v0/v1)
