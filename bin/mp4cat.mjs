@@ -3,7 +3,8 @@
 // Usage: mp4cat a.mp4 b.mp4 [more...] -o out.mp4
 //        mp4cat --info a.mp4 [b.mp4 ...]
 
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, mkdtemp, rename, rm, stat, realpath, chmod } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { isMp4, mp4Compat, concatMp4, mp4Info } from "../src/index.mjs";
 
 const USAGE = `Usage: mp4cat <a.mp4> <b.mp4> [more.mp4 ...] -o <out.mp4>
@@ -127,8 +128,29 @@ then run mp4cat on the re-encoded files.`);
     process.stdout.write(result);
     process.stderr.write("mp4cat: wrote mp4 to stdout (" + result.length + " bytes, " + inputs.length + " clips)\n");
   }else{
-    try{ await writeFile(out, result); }
-    catch(e){ fail("cannot write " + out + ": " + (e && e.message || e)); }
+    // Publish a complete file atomically. A failed write must not truncate an old output.
+    let staging;
+    try{
+      let target = resolve(out);
+      try{ target = await realpath(target); }catch(e){ if(e.code !== "ENOENT") throw e; }
+      let mode;
+      try{
+        const existing = await stat(target);
+        if(!existing.isFile()) throw new Error("output must be a regular file");
+        mode = existing.mode & 0o777;
+      }catch(e){ if(e.code !== "ENOENT") throw e; }
+      staging = await mkdtemp(join(dirname(target), ".mp4cat-"));
+      const pending = join(staging, "output");
+      await writeFile(pending, result);
+      if(mode !== undefined) await chmod(pending, mode);
+      await rename(pending, target);
+    }
+    catch(e){
+      // Clean up before fail() exits the process; finally would not run after process.exit.
+      if(staging) await rm(staging, { recursive: true, force: true }).catch(() => {});
+      fail("cannot write " + out + ": " + (e && e.message || e));
+    }
+    if(staging) await rm(staging, { recursive: true, force: true }).catch(() => {});
     console.log("wrote " + out + " (" + result.length + " bytes, " + inputs.length + " clips)");
   }
 }

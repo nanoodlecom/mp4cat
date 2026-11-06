@@ -15,13 +15,27 @@ function walk(dv, start, end){
     let size = dv.getUint32(p);
     const type = fourcc(dv, p+4);
     let hs = 8;
-    if(size === 1){ size = Number(dv.getBigUint64(p+8)); hs = 16; }
+    if(size === 1){
+      if(p + 16 > end) throw new Error("truncated extended box header");
+      size = Number(dv.getBigUint64(p+8)); hs = 16;
+    }
     else if(size === 0){ size = end - p; }
-    if(size < 8 || p + size > end) break;
+    if(!Number.isSafeInteger(size) || size < hs || p + size > end) throw new Error(type + " box extends past end of file or parent box (truncated file?)");
     out.push({ type, start: p, end: p+size, body: p+hs });
     p += size;
   }
+  if(p !== end) throw new Error("truncated box header");
   return out;
+}
+// Validate fields against their containing box, never against unrelated following bytes.
+function need(b, bytes){
+  if(!b || b.body + bytes > b.end) throw new Error((b?.type || "missing") + " box is truncated");
+}
+function table(dv, b, header, stride){
+  need(b, header);
+  const n = dv.getUint32(b.body + header - 4);
+  need(b, header + n * stride);
+  return n;
 }
 const find = (boxes, type) => boxes.find(b => b.type === type);
 
@@ -55,29 +69,36 @@ export function parseMp4(u8){
   const tracks = [];
   for(const trak of traks){
     const tb = walk(dv, trak.body, trak.end);
-    const mdia = find(tb, "mdia"); if(!mdia) continue;
+    const mdia = find(tb, "mdia"); if(!mdia) throw new Error("trak is missing mdia");
     const mb = walk(dv, mdia.body, mdia.end);
     const mdhd = find(mb, "mdhd");
     const hdlr = find(mb, "hdlr");
-    if(!hdlr) continue; // can't classify a trak without a handler
+    need(hdlr, 12); // cannot silently discard a track with an unknown handler
     const handler = fourcc(dv, hdlr.body + 8); // after ver/flags(4)+pre_defined(4)
     const kind = handler === "vide" ? "video" : handler === "soun" ? "audio" : handler;
     // A damaged media trak must fail loudly: silently skipping it would let a broken clip pass
-    // the gate as audio-only/video-only and drop a whole stream. Non-media traks skip quietly.
-    const isMedia = kind === "video" || kind === "audio";
+    // the gate as audio-only/video-only and drop a whole stream.
     const damaged = (what) => { throw new Error(kind + " trak is missing " + what + " (damaged file?)"); };
-    if(!mdhd){ if(isMedia) damaged("mdhd"); continue; }
+    if(!mdhd) damaged("mdhd");
+    need(mdhd, 4);
+    if(dv.getUint8(mdhd.body) > 1) throw new Error("unsupported mdhd version");
     const mdhdV1 = dv.getUint8(mdhd.body) === 1;
+    need(mdhd, mdhdV1 ? 32 : 20);
     // v0: [ver/flags 4][ctime 4][mtime 4][timescale 4]; v1: [ver/flags 4][ctime 8][mtime 8][timescale 4]
     const timescale = dv.getUint32(mdhd.body + (mdhdV1 ? 20 : 12));
-    const minf = find(mb, "minf"); if(!minf){ if(isMedia) damaged("minf"); continue; }
+    if(!timescale) throw new Error("track timescale must be positive");
+    const minf = find(mb, "minf"); if(!minf) damaged("minf");
     const minfB = walk(dv, minf.body, minf.end);
-    const stbl = find(minfB, "stbl"); if(!stbl){ if(isMedia) damaged("stbl"); continue; }
+    const stbl = find(minfB, "stbl"); if(!stbl) damaged("stbl");
     const sb = walk(dv, stbl.body, stbl.end);
-    const stsd = find(sb, "stsd"); if(!stsd){ if(isMedia) damaged("stsd"); continue; }
+    const stsd = find(sb, "stsd"); if(!stsd) damaged("stsd");
+    need(stsd, 8);
+    if(dv.getUint32(stsd.body + 4) !== 1) throw new Error("exactly one sample description is supported");
+    const entries = walk(dv, stsd.body + 8, stsd.end);
+    if(entries.length !== 1) throw new Error("invalid sample description count");
     const stsdRaw = u8.slice(stsd.start, stsd.end); // whole stsd box, copied verbatim into output
-    // first sample entry's 4cc: stsd hdr(8) + ver/flags(4) + entry_count(4) + entry size(4) → type at 20
-    const sampleEntry = stsdRaw.length >= 24 ? String.fromCharCode(stsdRaw[20], stsdRaw[21], stsdRaw[22], stsdRaw[23]) : "????";
+    // Use parsed boundaries: stsd itself may have an extended-size header.
+    const sampleEntry = entries[0].type;
     let codecCfg = null, codecCfgType = null;
     for(const cc of (CFG_BOXES[kind] || [...CFG_BOXES.video, ...CFG_BOXES.audio])){
       codecCfg = scanForBox(stsdRaw, cc);
@@ -87,16 +108,19 @@ export function parseMp4(u8){
     let width = 0, height = 0, trackId = tracks.length + 1;
     const tkhd = find(tb, "tkhd");
     if(tkhd){
+      need(tkhd, 4);
+      if(dv.getUint8(tkhd.body) > 1) throw new Error("unsupported tkhd version");
       const tkhdV1 = dv.getUint8(tkhd.body) === 1;
+      need(tkhd, tkhdV1 ? 96 : 84);
       trackId = dv.getUint32(tkhd.body + (tkhdV1 ? 20 : 12));
       if(kind === "video"){ width = dv.getUint16(tkhd.end - 8); height = dv.getUint16(tkhd.end - 4); }
     }
     // audio rate/channels from the mp4a-style sample entry (esds carries clip-specific bitrate, so
     // it's not a stable equality signal — rate+channels is what decides concat compatibility).
     let channels = 0, sampleRate = 0;
-    if(kind === "audio" && stsdRaw.length >= 52){
-      const adv = new DataView(stsdRaw.buffer, stsdRaw.byteOffset, stsdRaw.byteLength);
-      channels = adv.getUint16(16 + 24); sampleRate = adv.getUint16(16 + 32); // relative to sample entry at 16
+    if(kind === "audio"){
+      need(entries[0], 28);
+      channels = dv.getUint16(entries[0].body + 16); sampleRate = dv.getUint16(entries[0].body + 24);
     }
 
     // --- sample tables (all-empty in fragmented files with empty_moov) ---
@@ -104,36 +128,71 @@ export function parseMp4(u8){
     const stco = find(sb, "stco"), co64 = find(sb, "co64"), ctts = find(sb, "ctts"), stss = find(sb, "stss");
 
     // stsz
-    const stszSampleSize = stsz ? dv.getUint32(stsz.body + 4) : 0;
-    const sampleCount = stsz ? dv.getUint32(stsz.body + 8) : 0;
+    if(!stsz) throw new Error("missing stsz sample table");
+    need(stsz, 12);
+    const stszSampleSize = dv.getUint32(stsz.body + 4);
+    const sampleCount = dv.getUint32(stsz.body + 8);
+    // Every supported sample occupies at least one input byte; reject hostile counts before allocation.
+    if(sampleCount > u8.length) throw new Error("stsz sample count exceeds file size");
+    if(!stszSampleSize) need(stsz, 12 + sampleCount * 4);
     const sizes = new Array(sampleCount);
     if(stszSampleSize === 0){ for(let i=0;i<sampleCount;i++) sizes[i] = dv.getUint32(stsz.body + 12 + i*4); }
     else sizes.fill(stszSampleSize);
 
     // stts -> per-sample duration
-    const sttsN = stts ? dv.getUint32(stts.body + 4) : 0;
+    const sttsN = stts ? table(dv, stts, 8, 8) : 0;
     const durs = new Array(sampleCount); let si = 0;
-    for(let e=0;e<sttsN;e++){ const cnt = dv.getUint32(stts.body + 8 + e*8); const delta = dv.getUint32(stts.body + 12 + e*8); for(let k=0;k<cnt && si<sampleCount;k++) durs[si++] = delta; }
-    while(si < sampleCount) durs[si++] = durs[si-2] || 0;
+    for(let e=0;e<sttsN;e++){
+      const cnt = dv.getUint32(stts.body + 8 + e*8), delta = dv.getUint32(stts.body + 12 + e*8);
+      if(!cnt || si + cnt > sampleCount) throw new Error("stts sample count mismatch");
+      for(let k=0;k<cnt;k++) durs[si++] = delta;
+    }
+    if(si !== sampleCount) throw new Error("stts sample count mismatch");
 
-    // ctts -> per-sample composition offset (may be signed in v1; treat as int32)
+    // ctts v0 is unsigned; v1 is signed.
     const cts = new Array(sampleCount).fill(0);
-    if(ctts){ const n = dv.getUint32(ctts.body + 4); let ci = 0; for(let e=0;e<n;e++){ const cnt = dv.getUint32(ctts.body + 8 + e*8); const off = dv.getInt32(ctts.body + 12 + e*8); for(let k=0;k<cnt && ci<sampleCount;k++) cts[ci++] = off; } }
+    if(ctts){
+      const n = table(dv, ctts, 8, 8), version = dv.getUint8(ctts.body);
+      if(version > 1) throw new Error("unsupported ctts version");
+      let ci = 0;
+      for(let e=0;e<n;e++){
+        const cnt = dv.getUint32(ctts.body + 8 + e*8);
+        const off = version ? dv.getInt32(ctts.body + 12 + e*8) : dv.getUint32(ctts.body + 12 + e*8);
+        if(!cnt || ci + cnt > sampleCount) throw new Error("ctts sample count mismatch");
+        for(let k=0;k<cnt;k++) cts[ci++] = off;
+      }
+      if(ci !== sampleCount) throw new Error("ctts sample count mismatch");
+    }
 
     // stss -> sync set (1-based). absent => all sync
     let syncSet = null;
-    if(stss){ syncSet = new Set(); const n = dv.getUint32(stss.body + 4); for(let e=0;e<n;e++) syncSet.add(dv.getUint32(stss.body + 8 + e*4)); }
+    if(stss){
+      syncSet = new Set(); const n = table(dv, stss, 8, 4);
+      let last = 0;
+      for(let e=0;e<n;e++){
+        const index = dv.getUint32(stss.body + 8 + e*4);
+        if(index <= last || index > sampleCount) throw new Error("invalid stss sync sample index");
+        syncSet.add(index); last = index;
+      }
+    }
 
     // chunk offsets
+    if(stco && co64) throw new Error("ambiguous chunk offset tables");
     const co = stco || co64; const is64 = !!co64;
-    const coN = co ? dv.getUint32(co.body + 4) : 0;
+    const coN = co ? table(dv, co, 8, is64 ? 8 : 4) : 0;
     const chunkOffsets = new Array(coN);
     for(let e=0;e<coN;e++) chunkOffsets[e] = is64 ? Number(dv.getBigUint64(co.body + 8 + e*8)) : dv.getUint32(co.body + 8 + e*4);
 
     // stsc -> samples per chunk
-    const stscN = stsc ? dv.getUint32(stsc.body + 4) : 0;
+    const stscN = stsc ? table(dv, stsc, 8, 12) : 0;
     const stscEntries = [];
-    for(let e=0;e<stscN;e++) stscEntries.push({ first: dv.getUint32(stsc.body + 8 + e*12), spc: dv.getUint32(stsc.body + 12 + e*12) });
+    for(let e=0;e<stscN;e++){
+      const first = dv.getUint32(stsc.body + 8 + e*12), spc = dv.getUint32(stsc.body + 12 + e*12);
+      if(dv.getUint32(stsc.body + 16 + e*12) !== 1) throw new Error("unsupported sample description index in stsc");
+      if(!spc || first > coN || (e ? first <= stscEntries[e-1].first : first !== 1)) throw new Error("invalid stsc chunk run");
+      stscEntries.push({ first, spc });
+    }
+    if(coN && !stscN) throw new Error("missing stsc chunk run");
 
     // compute per-sample file offset
     const samples = [];
@@ -142,6 +201,7 @@ export function parseMp4(u8){
       // samples in this chunk = spc from the applicable stsc entry
       let spc = 1;
       for(let e=stscEntries.length-1;e>=0;e--){ if((c+1) >= stscEntries[e].first){ spc = stscEntries[e].spc; break; } }
+      if(sIdx + spc > sampleCount) throw new Error("stsc sample count mismatch");
       let off = chunkOffsets[c];
       for(let k=0;k<spc && sIdx<sampleCount;k++){
         samples.push({ offset: off, size: sizes[sIdx], dur: durs[sIdx], cts: cts[sIdx], sync: syncSet ? syncSet.has(sIdx+1) : true });
@@ -158,19 +218,29 @@ export function parseMp4(u8){
   const mvex = find(moovBoxes, "mvex");
   if(mvex){
     for(const tx of walk(dv, mvex.body, mvex.end).filter(b => b.type === "trex")){
-      trexById.set(dv.getUint32(tx.body + 4), { dur: dv.getUint32(tx.body + 12), size: dv.getUint32(tx.body + 16), flags: dv.getUint32(tx.body + 20) });
+      need(tx, 24);
+      const id = dv.getUint32(tx.body + 4);
+      if(trexById.has(id)) throw new Error("duplicate trex track");
+      trexById.set(id, { description: dv.getUint32(tx.body + 8), dur: dv.getUint32(tx.body + 12), size: dv.getUint32(tx.body + 16), flags: dv.getUint32(tx.body + 20) });
     }
   }
+  const byId = new Map(tracks.map(t => [t.trackId, t]));
+  if(byId.size !== tracks.length || byId.has(0)) throw new Error("invalid or duplicate track ID");
   const moofs = top.filter(b => b.type === "moof");
   if(moofs.length){
-    const byId = new Map(tracks.map(t => [t.trackId, t]));
-    for(const moof of moofs) parseMoof(dv, moof, byId, trexById);
+    const decodeEnds = new Map(tracks.filter(t => t.samples.length).map(t => [t.trackId, t.samples.reduce((n, s) => n + s.dur, 0)]));
+    for(const moof of moofs) parseMoof(dv, moof, byId, trexById, decodeEnds);
   }
   // every sample must live inside the file — a truncated download parses fine up to here but
   // its mdat is cut, and copying clamped subarrays would silently emit a corrupt output
+  const media = top.filter(b => b.type === "mdat");
   for(const t of tracks){
     for(const s of t.samples){
+      if(!Number.isSafeInteger(s.offset) || s.offset < 0) throw new Error("invalid sample offset");
+      if(!s.size) throw new Error("sample size must be positive");
+      if(!s.dur) throw new Error("sample duration must be positive");
       if(s.offset + s.size > u8.byteLength) throw new Error(t.kind + " samples extend past end of file (truncated file?)");
+      if(!media.some(b => s.offset >= b.body && s.offset + s.size <= b.end)) throw new Error("sample is outside mdat payload");
     }
   }
   return { tracks, fragmented: moofs.length > 0 };
@@ -178,28 +248,53 @@ export function parseMp4(u8){
 
 // Append one moof's samples to their tracks. Handles tfhd/trex defaults, explicit /
 // default-base-is-moof / carry-forward base data offsets, and v0/v1 trun composition offsets.
-function parseMoof(dv, moof, byId, trexById){
+function parseMoof(dv, moof, byId, trexById, decodeEnds){
   let carry = moof.start; // default base for the first traf; advances past each traf's data
   for(const traf of walk(dv, moof.body, moof.end).filter(b => b.type === "traf")){
     const tb = walk(dv, traf.body, traf.end);
-    const tfhd = find(tb, "tfhd"); if(!tfhd) continue;
+    const tfhd = find(tb, "tfhd");
+    need(tfhd, 8);
+    if(tb.filter(b => b.type === "tfhd").length !== 1) throw new Error("duplicate tfhd");
     const tfFlags = dv.getUint32(tfhd.body) & 0xffffff;
     const trackId = dv.getUint32(tfhd.body + 4);
     const track = byId.get(trackId);
-    const trex = trexById.get(trackId) || { dur: 0, size: 0, flags: 0 };
-    let p = tfhd.body + 8, base = null;
+    if(!track) throw new Error("fragment references unknown track " + trackId);
+    const trex = trexById.get(trackId) || { description: 1, dur: 0, size: 0, flags: 0 };
+    if(dv.getUint8(tfhd.body) !== 0 || (tfFlags & ~0x03003b)) throw new Error("unsupported tfhd flags/version");
+    need(tfhd, 8 + ((tfFlags & 1) ? 8 : 0) + [2, 8, 16, 32].filter(f => tfFlags & f).length * 4);
+    let p = tfhd.body + 8, base = null, description = trex.description;
     if(tfFlags & 0x01){ base = Number(dv.getBigUint64(p)); p += 8; }
-    if(tfFlags & 0x02) p += 4; // sample_description_index
+    if(tfFlags & 0x02){ description = dv.getUint32(p); p += 4; }
+    if(description !== 1) throw new Error("unsupported fragment sample description index");
     let defDur = trex.dur, defSize = trex.size, defFlags = trex.flags;
     if(tfFlags & 0x08){ defDur = dv.getUint32(p); p += 4; }
     if(tfFlags & 0x10){ defSize = dv.getUint32(p); p += 4; }
     if(tfFlags & 0x20){ defFlags = dv.getUint32(p); p += 4; }
     if(base === null) base = (tfFlags & 0x20000) ? moof.start : carry; // 0x20000 = default-base-is-moof
     let pos = base;
+    let decodeTime = decodeEnds.get(trackId);
+    const tfdt = find(tb, "tfdt");
+    if(tb.filter(b => b.type === "tfdt").length > 1) throw new Error("duplicate tfdt");
+    if(tfdt){
+      need(tfdt, 8);
+      const version = dv.getUint8(tfdt.body);
+      if(version > 1) throw new Error("unsupported tfdt version");
+      need(tfdt, version ? 12 : 8);
+      const start = version ? Number(dv.getBigUint64(tfdt.body + 4)) : dv.getUint32(tfdt.body + 4);
+      if(!Number.isSafeInteger(start) || (decodeTime !== undefined && start !== decodeTime)) throw new Error("fragment decode timeline has a gap or overlap");
+      decodeTime = start;
+    }
+    decodeTime ??= 0;
     for(const trun of tb.filter(b => b.type === "trun")){
+      need(trun, 8);
       const ver = dv.getUint8(trun.body);
       const trFlags = dv.getUint32(trun.body) & 0xffffff;
+      if(ver > 1 || (trFlags & ~0xf05) || ((trFlags & 4) && (trFlags & 0x400))) throw new Error("unsupported trun flags/version");
       const n = dv.getUint32(trun.body + 4);
+      const stride = [0x100, 0x200, 0x400, 0x800].filter(f => trFlags & f).length * 4;
+      need(trun, 8 + ((trFlags & 1) ? 4 : 0) + ((trFlags & 4) ? 4 : 0) + n * stride);
+      if(n > dv.byteLength) throw new Error("fragment sample count exceeds file size");
+      if(n && (tfFlags & 0x10000)) throw new Error("duration-is-empty fragment contains samples");
       let q = trun.body + 8, firstFlags = null;
       if(trFlags & 0x1){ pos = base + dv.getInt32(q); q += 4; }
       if(trFlags & 0x4){ firstFlags = dv.getUint32(q); q += 4; }
@@ -210,10 +305,13 @@ function parseMoof(dv, moof, byId, trexById){
         if(trFlags & 0x400){ flags = dv.getUint32(q); q += 4; }
         else if(i === 0 && firstFlags !== null) flags = firstFlags;
         if(trFlags & 0x800){ cts = ver ? dv.getInt32(q) : dv.getUint32(q); q += 4; }
-        if(track) track.samples.push({ offset: pos, size, dur, cts, sync: !((flags >>> 16) & 1) });
+        track.samples.push({ offset: pos, size, dur, cts, sync: !((flags >>> 16) & 1) });
+        decodeTime += dur;
+        if(!Number.isSafeInteger(decodeTime)) throw new Error("fragment decode timeline exceeds safe precision");
         pos += size;
       }
     }
+    decodeEnds.set(trackId, decodeTime);
     carry = pos;
   }
 }
@@ -240,6 +338,7 @@ function rle(values){ // -> [count,val] runs
 // first video sample. Output is streamable: moov before mdat (faststart), samples interleaved
 // across tracks in ~0.5 s chunks so playback never waits on a far-away byte range.
 export function concatMp4(buffers, opts){
+  if(!buffers?.length) throw new Error("need at least one input clip");
   const dedup = !!(opts && opts.dedup);
   const parsed = buffers.map(parseMp4);
   // gather track kinds present in clip0
@@ -258,7 +357,9 @@ export function concatMp4(buffers, opts){
       let list = t.samples;
       if(dedup && kind==="video" && ci>0) list = list.slice(1);
       for(const s of list){
-        merged.samples.push({ bufIdx: ci, offset: s.offset, size: s.size, dur: Math.round(s.dur*scale), cts: Math.round(s.cts*scale), sync: s.sync });
+        const dur = Math.round(s.dur*scale), cts = Math.round(s.cts*scale);
+        if(dur < 1 || dur > 0xffffffff || cts < -0x80000000 || cts > 0xffffffff) throw new Error("rescaled sample duration or composition offset is out of range");
+        merged.samples.push({ bufIdx: ci, offset: s.offset, size: s.size, dur, cts, sync: s.sync });
       }
     }
     outTracks.push(merged);
@@ -302,6 +403,7 @@ export function concatMp4(buffers, opts){
       const t = outTracks[k];
       const totalTicks = t.samples.reduce((a,s)=>a+s.dur, 0);
       const durMs = Math.round(totalTicks / t.timescale * mvTimescale);
+      if(!Number.isSafeInteger(totalTicks) || durMs > 0xffffffff) throw new Error("output duration exceeds supported movie duration");
       if(durMs > maxDurMs) maxDurMs = durMs;
 
       // stbl children
@@ -319,6 +421,7 @@ export function concatMp4(buffers, opts){
         const anyCts = t.samples.some(s=>s.cts!==0);
         if(anyCts){
           const cttsVer = t.samples.some(s=>s.cts<0) ? 1 : 0; // v0 is unsigned; negatives need v1
+          if(cttsVer && t.samples.some(s => s.cts > 0x7fffffff)) throw new Error("composition offsets cannot share one signed ctts table");
           const cttsRuns = rle(t.samples.map(s=>s.cts));
           children.push(fullbox("ctts", cttsVer, 0, u32(cttsRuns.length), u32Table(cttsRuns.flat())));
         }
@@ -379,31 +482,47 @@ export function isMp4(u8){ if(u8.length<12) return false; const dv=new DataView(
 
 function bytesEqual(a, b){ if(!a || !b || a.length !== b.length) return false; for(let i=0;i<a.length;i++) if(a[i]!==b[i]) return false; return true; }
 
-// Comparable audio decoder-config signature. Whole-esds comparison would false-reject same-encoder
-// clips (DecoderConfigDescriptor carries per-clip bufferSizeDB/maxBitrate/avgBitrate), so for esds
-// we compare only objectTypeIndication + DecoderSpecificInfo (the AudioSpecificConfig — profile,
-// frame length, SBR signaling: what actually decides decode compatibility). dOps has no per-clip
-// fields and compares whole. alac carries avgBitRate/maxFrameBytes → null (rate/channel gate only).
+// Compare decoder state, excluding only known per-clip bitrate statistics.
+// Invalid/missing descriptors must fail closed, even when both clips are damaged.
 function audioCfgSig(cfg, type){
   if(!cfg) return null;
-  if(type === "dOps") return cfg;
+  if(type === "dOps") return cfg.length >= 19 ? cfg : null;
+  if(type === "alac"){
+    if(cfg.length !== 36) return null;
+    const sig = cfg.slice(); sig.fill(0, 24, 32); // maxFrameBytes, avgBitRate
+    return sig;
+  }
   if(type !== "esds") return null;
   try{
-    let p = 12; // box hdr(8) + ver/flags(4)
-    const len = () => { let l = 0, b; do{ b = cfg[p++]; l = (l<<7) | (b & 0x7f); }while(b & 0x80); return l; };
-    if(cfg[p++] !== 0x03) return null; len();
-    p += 2; const f = cfg[p++]; // ES_ID(2) + flags
-    if(f & 0x80) p += 2;              // dependsOn_ES_ID
-    if(f & 0x40) p += 1 + cfg[p];     // URL
-    if(f & 0x20) p += 2;              // OCR_ES_ID
-    if(cfg[p++] !== 0x04) return null;
-    len();
-    const oti = cfg[p]; p += 13; // OTI(1)+streamType(1)+bufferSizeDB(3)+maxBitrate(4)+avgBitrate(4)
-    if(p >= cfg.length || cfg[p++] !== 0x05) return Uint8Array.of(oti); // no ASC → OTI only
-    const dsLen = len();
-    const out = new Uint8Array(1 + dsLen); out[0] = oti; out.set(cfg.subarray(p, p + dsLen), 1);
-    return out;
-  }catch(e){ return null; }
+    let p = 12; // box header + fullbox version/flags
+    const read = end => {
+      if(p >= end) throw new Error("truncated descriptor");
+      return cfg[p++];
+    };
+    const descriptor = (tag, end) => {
+      if(read(end) !== tag) throw new Error("unexpected descriptor");
+      let len = 0;
+      for(let i=0;i<4;i++){
+        const b = read(end); len = len * 128 + (b & 0x7f);
+        if(!(b & 0x80)){
+          if(p + len > end) throw new Error("truncated descriptor payload");
+          return p + len;
+        }
+      }
+      throw new Error("invalid descriptor length");
+    };
+    const esEnd = descriptor(0x03, cfg.length);
+    read(esEnd); read(esEnd); const flags = read(esEnd);
+    if(flags & 0x80){ read(esEnd); read(esEnd); }
+    if(flags & 0x40){ const len = read(esEnd); for(let i=0;i<len;i++) read(esEnd); }
+    if(flags & 0x20){ read(esEnd); read(esEnd); }
+    const decEnd = descriptor(0x04, esEnd);
+    const oti = read(decEnd);
+    for(let i=0;i<12;i++) read(decEnd); // stream type and bitrate statistics
+    const ascEnd = descriptor(0x05, decEnd);
+    if(ascEnd === p) return null;
+    return concat([Uint8Array.of(oti), cfg.subarray(p, ascEnd)]);
+  }catch{ return null; }
 }
 
 // Strict gate with a human-readable verdict: { ok, reason }. reason is null when ok, otherwise one
@@ -425,10 +544,14 @@ export function mp4Compat(bufs, opts){
   if(!b.v.length && !b.a.length) return no(name(0) + " has no video or audio track");
   for(let i=0;i<ps.length;i++){
     const s = i ? shape(ps[i]) : b;
+    if(ps[i].tracks.some(t => t.kind !== "video" && t.kind !== "audio")) return no(name(i) + " has unsupported non-media tracks (mp4cat cannot preserve them)");
     if(s.v.length !== b.v.length) return no(name(i) + " has " + s.v.length + " video track(s) but " + name(0) + " has " + b.v.length + " (video must be all-or-none, at most one)");
     if(s.a.length !== b.a.length) return no(name(i) + " has " + s.a.length + " audio track(s) but " + name(0) + " has " + b.a.length + " (audio must be all-or-none, at most one)");
     for(const t of [...s.v, ...s.a]){
       if(!t.samples.length) return no(name(i) + "'s " + t.kind + " track has no samples");
+    }
+    for(const t of s.a){
+      if(!audioCfgSig(t.codecCfg, t.codecCfgType)) return no(name(i) + " has missing or invalid audio decoder configuration");
     }
     if(i === 0) continue;
     if(s.v.length){

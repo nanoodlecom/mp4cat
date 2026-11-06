@@ -100,6 +100,13 @@ If the inputs don't match, mp4cat exits with an error that names the
 offending file and the exact difference (resolution, codec, sample rate, …)
 plus the ffmpeg one-liner to fix it — rather than guessing.
 
+File output is staged beside the destination and renamed into place only after
+writing succeeds. A write failure preserves an existing output. Existing file
+permissions and resolved symlink targets are preserved; concurrent successful
+writers publish complete files with the last rename winning. Stdout remains a
+stream and cannot be rolled back. A process killed during staging may leave a
+`.mp4cat-*` temporary directory beside the destination.
+
 ## API
 
 Full TypeScript declarations ship with the package.
@@ -163,10 +170,23 @@ end-to-end runs.
   files. Audio-only (m4a) works; video-only works.
 - **Edit lists are not preserved.** Clips relying on `elst` for A/V sync or
   leading-sample trims may drift slightly at seams.
+- **Malformed or unsupported timelines fail closed.** Sample tables must agree,
+  samples must point inside `mdat` payloads, and timescales/sample durations
+  must be positive. Each track supports one sample description. Fragment decode
+  timestamps must be contiguous within a file; gaps, overlaps, and unknown
+  track IDs are rejected. An initial fragment decode origin is normalized per
+  track; differing initial A/V origins are not preserved.
+- **Output timing has bounds.** Rescaling that rounds a sample duration to zero,
+  overflows a sample field, or needs incompatible signed/unsigned composition
+  offsets is rejected. Movie duration is limited to 32-bit milliseconds
+  (about 49.7 days); track media durations can use 64-bit fields.
 - **Timescale mismatches are rescaled with rounding.** Clips whose tracks use
   a different timescale than the first clip get their sample durations
   rescaled to the first clip's timescale via `Math.round`, so a tiny drift is
   possible at seams; byte-identical codec config is still required.
+
+The [state-machine audit](https://github.com/nanoodlecom/mp4cat/blob/main/docs/state-machines.md) records parser, timeline,
+output, CLI, and release transitions and their regression coverage.
 
 ## Provenance
 

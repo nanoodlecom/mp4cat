@@ -352,6 +352,23 @@ test("CLI rejects flags that would be silently ignored, and bare '-' anywhere", 
   }
 });
 
+test("audio compatibility fails closed for missing or damaged decoder descriptors", (t) => {
+  if(!dir) return t.skip(skipMsg);
+  for(const mutate of [
+    (bytes, at) => { bytes[at] = 0; }, // no recognized config box
+    (bytes, at) => { bytes[at + 8] = 0; }, // invalid ES descriptor tag
+    (bytes, at) => { bytes[at + 9] = 0x7f; }, // declared payload outside esds
+  ]){
+    const bytes = M4A1.slice();
+    const at = indexOfFourcc(bytes, "esds");
+    assert.ok(at > 0);
+    mutate(bytes, at);
+    const result = mp4Compat([bytes, bytes]);
+    assert.equal(result.ok, false, "two equally damaged configs must not pass");
+    assert.match(result.reason, /invalid audio decoder configuration/);
+  }
+});
+
 test("cleanup", async (t) => {
   if(dir) await rm(dir, { recursive: true, force: true });
 });
