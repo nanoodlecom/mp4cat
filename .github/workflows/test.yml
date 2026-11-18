@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -24,3 +27,84 @@ jobs:
         run: command -v ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
       - run: npm ci
       - run: npm test
+
+  package:
+    name: Pack tested npm distribution
+    if: github.event_name == 'pull_request' || (github.repository == 'nanoodlecom/mp4cat' && github.ref == 'refs/heads/main')
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.pack.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+      - name: Pack and validate the release archive
+        id: pack
+        run: |
+          mkdir -p "$RUNNER_TEMP/distribution"
+          npm pack --ignore-scripts --json --pack-destination "$RUNNER_TEMP/distribution" > "$RUNNER_TEMP/pack.json"
+          node --input-type=module <<'JS'
+          import { appendFileSync, readFileSync, renameSync } from 'node:fs';
+          import { join } from 'node:path';
+          const { RUNNER_TEMP, GITHUB_OUTPUT } = process.env;
+          const [packed] = JSON.parse(readFileSync(join(RUNNER_TEMP, 'pack.json'), 'utf8'));
+          if (packed.name !== 'mp4cat' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(packed.version) ||
+              packed.filename !== `mp4cat-${packed.version}.tgz`) {
+            throw new Error('Unexpected npm package metadata');
+          }
+          renameSync(join(RUNNER_TEMP, 'distribution', packed.filename), join(RUNNER_TEMP, 'distribution', 'package.tgz'));
+          appendFileSync(GITHUB_OUTPUT, `version=${packed.version}\n`);
+          JS
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: npm-distribution
+          path: ${{ runner.temp }}/distribution/package.tgz
+          if-no-files-found: error
+
+  publish:
+    name: Publish tested npm distribution
+    if: github.repository == 'nanoodlecom/mp4cat' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: npm-publish
+      cancel-in-progress: false
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/mp4cat/v/${{ needs.package.outputs.version }}
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-distribution
+      - name: Publish version if absent from npm
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          status="$(curl --silent --show-error --retry 2 --max-time 30 \
+            --output "$RUNNER_TEMP/registry.json" --write-out '%{http_code}' \
+            "https://registry.npmjs.org/mp4cat/$VERSION")"
+          case "$status" in
+            200)
+              jq -e --arg version "$VERSION" '.name == "mp4cat" and .version == $version' "$RUNNER_TEMP/registry.json" >/dev/null
+              echo "mp4cat@$VERSION is already published"
+              ;;
+            404)
+              flags=()
+              if [[ "$VERSION" == *-* ]]; then flags+=(--tag next); fi
+              npm publish ./package.tgz --ignore-scripts --access public "${flags[@]}"
+              ;;
+            *) echo "npm version lookup returned HTTP $status" >&2; exit 1 ;;
+          esac
