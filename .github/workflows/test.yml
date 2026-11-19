@@ -7,15 +7,19 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Package version to publish from main
+        description: Version to publish from main
         required: true
         type: string
+      source_only:
+        description: Recover the GitHub source release without publishing to npm
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 jobs:
-  # Only a tested version change on main creates a GitHub source release.
+  # Qualify a version change on main or an explicit source-only recovery.
   qualify-github-source:
     name: Qualify GitHub source release
     if: github.event_name == 'pull_request' || (github.repository == 'nanoodlecom/mp4cat' && github.ref == 'refs/heads/main')
@@ -33,19 +37,25 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: '24.22.1'
+          node-version: '24.22.3'
       - name: Compare the packaged version with the prior main commit
         id: qualify
         env:
           BEFORE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          SOURCE_ONLY: ${{ inputs.source_only }}
         run: |
           npm pack --ignore-scripts --json --pack-destination "$RUNNER_TEMP" > "$RUNNER_TEMP/source-pack.json"
           node .github/scripts/publish_source.mjs qualify "$RUNNER_TEMP/source-pack.json" >> "$GITHUB_OUTPUT"
 
   publish-github-source:
     name: Publish tested GitHub source release
-    if: ${{ github.repository == 'nanoodlecom/mp4cat' && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.qualify-github-source.outputs.version != '' }}
-    needs: qualify-github-source
+    if: >-
+      github.repository == 'nanoodlecom/mp4cat' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.source_only)) &&
+      needs.qualify-github-source.outputs.version != '' &&
+      needs.qualify-github-source.outputs.version == needs.package.outputs.version
+    needs: [qualify-github-source, package]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -59,11 +69,13 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: '24.22.1'
+          node-version: '24.22.3'
       - name: Tag and release the tested source
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_VERSION: ${{ needs.qualify-github-source.outputs.version }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          SOURCE_ONLY: ${{ inputs.source_only }}
+          SOURCE_VERSION: ${{ needs.package.outputs.version }}
         run: node .github/scripts/publish_source.mjs publish "$SOURCE_VERSION"
 
   test:
@@ -152,7 +164,7 @@ jobs:
     name: Publish tested npm distribution
     if: >-
       github.repository == 'nanoodlecom/mp4cat' && github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.source_only))
     needs: package
     runs-on: ubuntu-latest
     timeout-minutes: 5
