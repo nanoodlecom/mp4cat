@@ -102,7 +102,7 @@ function publish(version) {
   const endpoint = 'repos/' + repository + '/releases';
   const method = existing ? 'PATCH' : 'POST';
   const path = existing ? endpoint + '/' + existing.id : endpoint;
-  const body = existing ? { draft: false } : payload;
+  const body = existing ? { draft: false, tag_name: tag, target_commitish: source } : payload;
   const record = JSON.parse(output('gh', ['api', '--method', method, path, '--input', '-'], JSON.stringify(body)));
   if (record.tag_name !== tag || record.draft || record.prerelease !== prerelease || tagCommit(tag) !== source) {
     throw new Error('Unexpected published release state for ' + tag);
