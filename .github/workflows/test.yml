@@ -188,18 +188,32 @@ jobs:
         env:
           VERSION: ${{ needs.package.outputs.version }}
         run: |
+          set -euo pipefail
+          registry_url="https://registry.npmjs.org/mp4cat/$VERSION"
+          registry_metadata="$RUNNER_TEMP/registry.json"
+          archive_integrity="sha512-$(openssl dgst -sha512 -binary package.tgz | openssl base64 -A)"
+          verify_registry_archive() {
+            if ! jq -e --arg version "$VERSION" --arg integrity "$archive_integrity" \
+              '.name == "mp4cat" and .version == $version and .dist.integrity == $integrity' \
+              "$registry_metadata" >/dev/null; then
+              echo "npm metadata for mp4cat@$VERSION does not match the tested archive" >&2
+              return 1
+            fi
+          }
           status="$(curl --silent --show-error --retry 2 --max-time 30 \
-            --output "$RUNNER_TEMP/registry.json" --write-out '%{http_code}' \
-            "https://registry.npmjs.org/mp4cat/$VERSION")"
+            --output "$registry_metadata" --write-out '%{http_code}' "$registry_url")"
           case "$status" in
             200)
-              jq -e --arg version "$VERSION" '.name == "mp4cat" and .version == $version' "$RUNNER_TEMP/registry.json" >/dev/null
-              echo "mp4cat@$VERSION is already published"
+              verify_registry_archive
+              echo "The tested mp4cat@$VERSION archive is already published"
               ;;
             404)
               flags=()
               if [[ "$VERSION" == *-* ]]; then flags+=(--tag next); fi
               npm publish ./package.tgz --ignore-scripts --access public "${flags[@]}"
+              curl --fail --silent --show-error --retry 4 --retry-all-errors --retry-delay 2 \
+                --retry-max-time 30 --max-time 10 --output "$registry_metadata" "$registry_url"
+              verify_registry_archive
               ;;
             *) echo "npm version lookup returned HTTP $status" >&2; exit 1 ;;
           esac
