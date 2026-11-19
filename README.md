@@ -197,6 +197,16 @@ written so generated clips could be joined *in the browser tab* with exact
 durations, after real-time re-recording via `MediaRecorder` proved lossy and
 fragile. Extracted so it can be used anywhere.
 
+## Publishing to npm
+
+Configure npm Trusted Publishing for `mp4cat` with GitHub repository
+`nanoodlecom/mp4cat`, workflow `test.yml`, environment `npm`, and direct
+publish enabled. The GitHub environment accepts `main` only.
+
+A version change on `main` runs the tests and publishes the resulting
+archive. To release an already-declared version, run the `test` workflow
+from `main` and enter that exact package version.
+
 ## License
 
 [MIT](LICENSE)

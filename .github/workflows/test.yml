@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Package version to publish from main
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -81,8 +87,11 @@ jobs:
 
   package:
     name: Pack tested npm distribution
-    if: github.event_name == 'pull_request' || (github.repository == 'nanoodlecom/mp4cat' && github.ref == 'refs/heads/main')
-    needs: test
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.repository == 'nanoodlecom/mp4cat' && github.ref == 'refs/heads/main' &&
+        (github.event_name == 'workflow_dispatch' || needs.qualify-github-source.outputs.version != ''))
+    needs: [test, qualify-github-source]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -93,26 +102,31 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.22.1'
+          node-version: '24.22.3'
       - name: Pack and validate the release archive
         id: pack
+        env:
+          EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || needs.qualify-github-source.outputs.version }}
         run: |
           mkdir -p "$RUNNER_TEMP/distribution"
           npm pack --ignore-scripts --json --pack-destination "$RUNNER_TEMP/distribution" > "$RUNNER_TEMP/pack.json"
           node --input-type=module <<'JS'
           import { appendFileSync, readFileSync, renameSync } from 'node:fs';
           import { join } from 'node:path';
-          const { RUNNER_TEMP, GITHUB_OUTPUT } = process.env;
+          const { RUNNER_TEMP, GITHUB_OUTPUT, GITHUB_EVENT_NAME, EXPECTED_VERSION } = process.env;
           const [packed] = JSON.parse(readFileSync(join(RUNNER_TEMP, 'pack.json'), 'utf8'));
           if (packed.name !== 'mp4cat' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(packed.version) ||
               packed.filename !== `mp4cat-${packed.version}.tgz`) {
             throw new Error('Unexpected npm package metadata');
           }
+          if (GITHUB_EVENT_NAME !== 'pull_request' && packed.version !== EXPECTED_VERSION) {
+            throw new Error('The requested release version differs from the tested package');
+          }
           renameSync(join(RUNNER_TEMP, 'distribution', packed.filename), join(RUNNER_TEMP, 'distribution', 'package.tgz'));
           appendFileSync(GITHUB_OUTPUT, `version=${packed.version}\n`);
           JS
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         with:
           name: npm-distribution
           path: ${{ runner.temp }}/distribution/package.tgz
@@ -120,7 +134,9 @@ jobs:
 
   publish:
     name: Publish tested npm distribution
-    if: github.repository == 'nanoodlecom/mp4cat' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'nanoodlecom/mp4cat' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: package
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -135,7 +151,7 @@ jobs:
     steps:
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.22.1'
+          node-version: '24.22.3'
           registry-url: https://registry.npmjs.org
       - uses: actions/download-artifact@v4
         with:
