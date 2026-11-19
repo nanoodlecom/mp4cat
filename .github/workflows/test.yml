@@ -67,29 +67,39 @@ jobs:
         run: node .github/scripts/publish_source.mjs publish "$SOURCE_VERSION"
 
   test:
+    name: test (${{ matrix.node }})
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       matrix:
-        node: ["22.23.5", "24.22.3", "26.13.1"]
+        include:
+          - node: '22.23.5'
+            image: node:22.23.5-alpine3.23@sha256:6868d4695b947ee120bffaa463fecd68cde370d7bfec92955e7c8ac576b4f475
+          - node: '24.22.3'
+            image: node:24.22.3-alpine3.24@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5
+          - node: '26.13.1'
+            image: node:26.13.1-alpine3.24@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
-      # Test fixtures are generated at test time with ffmpeg/ffprobe; without
-      # them the fixture-based tests self-skip. Install so the full suite runs.
-      - name: Ensure FFmpeg is available
-        timeout-minutes: 6
+          persist-credentials: false
+      - name: Test with FFmpeg and FFprobe
+        shell: bash
+        env:
+          NODE_IMAGE: ${{ matrix.image }}
+          EXPECTED_NODE: ${{ matrix.node }}
         run: |
-          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
-            sudo apt-get -o Acquire::Retries=3 update
-            sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends ffmpeg
-          fi
-          ffmpeg -version
-          ffprobe -version
-      - run: npm ci
-      - run: npm test
+          git archive HEAD | docker run --rm -i -e EXPECTED_NODE "$NODE_IMAGE" sh -ec '
+            test "$(node --version)" = "v$EXPECTED_NODE"
+            apk add --no-cache ffmpeg
+            ffmpeg -version
+            ffprobe -version
+            mkdir -p /tmp/mp4cat
+            tar -xf - -C /tmp/mp4cat
+            cd /tmp/mp4cat
+            npm ci
+            npm test
+          '
 
   package:
     name: Pack tested npm distribution
